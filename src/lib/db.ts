@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import {
   Product,
   Order,
@@ -20,7 +21,14 @@ interface DatabaseSchema {
   version: string;
 }
 
-const DB_PATH = path.join(process.cwd(), 'data', 'orderpilot-db.json');
+function getDbPath(): string {
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NODE_ENV === 'production') {
+    return path.join(os.tmpdir(), 'orderpilot-db.json');
+  }
+  return path.join(process.cwd(), 'data', 'orderpilot-db.json');
+}
+
+let memoryDb: DatabaseSchema | null = null;
 
 const INITIAL_PRODUCTS: Product[] = [
   {
@@ -295,62 +303,82 @@ const INITIAL_EVENTS: AgentEvent[] = [
   },
 ];
 
-function ensureDataDir(): void {
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+function ensureDataDir(targetPath: string): void {
+  try {
+    const dir = path.dirname(targetPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {
+    // Ignore directory creation issues in read-only serverless filesystems
   }
 }
 
 function readDb(): DatabaseSchema {
-  ensureDataDir();
-  if (!fs.existsSync(DB_PATH)) {
-    const initialDb: DatabaseSchema = {
-      products: INITIAL_PRODUCTS,
-      orders: INITIAL_ORDERS,
-      sessions: [],
-      events: INITIAL_EVENTS,
-      approvals: [
-        {
-          id: 'appr-001',
-          order_id: 'ORD-2026-001',
-          action: 'approved',
-          previous_status: 'pending_approval',
-          new_status: 'approved',
-          reviewer_label: 'Store Manager (Demo)',
-          notes: 'Standard approval, items in stock.',
-          created_at: '2026-10-04T10:20:00.000Z',
-        },
-      ],
-      settings: INITIAL_SETTINGS,
-      version: '1.0.0',
-    };
-    writeDb(initialDb);
-    return initialDb;
+  if (memoryDb) {
+    return memoryDb;
   }
 
-  try {
-    const raw = fs.readFileSync(DB_PATH, 'utf-8');
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error('Failed to parse database file, reinitializing', err);
-    const fallbackDb: DatabaseSchema = {
-      products: INITIAL_PRODUCTS,
-      orders: INITIAL_ORDERS,
-      sessions: [],
-      events: INITIAL_EVENTS,
-      approvals: [],
-      settings: INITIAL_SETTINGS,
-      version: '1.0.0',
-    };
-    writeDb(fallbackDb);
-    return fallbackDb;
+  const primaryPath = getDbPath();
+  const repoSeedPath = path.join(process.cwd(), 'data', 'orderpilot-db.json');
+
+  if (fs.existsSync(primaryPath)) {
+    try {
+      const raw = fs.readFileSync(primaryPath, 'utf-8');
+      memoryDb = JSON.parse(raw);
+      return memoryDb!;
+    } catch {
+      // Fall through
+    }
   }
+
+  if (primaryPath !== repoSeedPath && fs.existsSync(repoSeedPath)) {
+    try {
+      const raw = fs.readFileSync(repoSeedPath, 'utf-8');
+      memoryDb = JSON.parse(raw);
+      writeDb(memoryDb!);
+      return memoryDb!;
+    } catch {
+      // Fall through
+    }
+  }
+
+  const initialDb: DatabaseSchema = {
+    products: INITIAL_PRODUCTS,
+    orders: INITIAL_ORDERS,
+    sessions: [],
+    events: INITIAL_EVENTS,
+    approvals: [
+      {
+        id: 'appr-001',
+        order_id: 'ORD-2026-001',
+        action: 'approved',
+        previous_status: 'pending_approval',
+        new_status: 'approved',
+        reviewer_label: 'Store Manager (Demo)',
+        notes: 'Standard approval, items in stock.',
+        created_at: '2026-10-04T10:20:00.000Z',
+      },
+    ],
+    settings: INITIAL_SETTINGS,
+    version: '1.0.0',
+  };
+
+  memoryDb = initialDb;
+  writeDb(initialDb);
+  return initialDb;
 }
 
 function writeDb(db: DatabaseSchema): void {
-  ensureDataDir();
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
+  memoryDb = db;
+  const targetPath = getDbPath();
+  try {
+    ensureDataDir(targetPath);
+    fs.writeFileSync(targetPath, JSON.stringify(db, null, 2), 'utf-8');
+  } catch (err) {
+    // Graceful fallback for serverless read-only filesystem
+    console.warn('Filesystem write skipped, maintained in-memory:', err);
+  }
 }
 
 export const db = {
