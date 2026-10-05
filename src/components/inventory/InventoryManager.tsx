@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Package,
   Search,
@@ -16,24 +16,44 @@ import {
   X,
   CheckCircle,
   AlertCircle,
+  ArrowUpDown,
+  Eye,
+  ArrowRight,
+  TrendingDown,
+  Layers,
+  History,
 } from 'lucide-react';
 import { Product } from '@/lib/types';
 
 interface InventoryManagerProps {
   products: Product[];
   onInventoryUpdated: () => void;
+  onShowToast?: (type: 'success' | 'warning' | 'error' | 'info', title: string, message?: string) => void;
 }
 
-export function InventoryManager({ products, onInventoryUpdated }: InventoryManagerProps) {
+export function InventoryManager({
+  products,
+  onInventoryUpdated,
+  onShowToast,
+}: InventoryManagerProps) {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
-  const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'All' | 'in_stock' | 'low_stock' | 'out_of_stock'>('All');
+  const [sortBy, setSortBy] = useState<'stock_asc' | 'stock_desc' | 'name_asc' | 'price_desc'>('stock_asc');
+
+  // Product Detail Drawer
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
+  // Stock Adjustment Modal
+  const [adjustingProduct, setAdjustingProduct] = useState<Product | null>(null);
+  const [adjustType, setAdjustType] = useState<'increase' | 'decrease'>('increase');
+  const [adjustQuantity, setAdjustQuantity] = useState(5);
+  const [adjustReason, setAdjustReason] = useState('Restock shipment received');
+  const [actionLoading, setActionLoading] = useState(false);
 
   // Add / Edit Modal state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
-
-  // Form Fields
   const [sku, setSku] = useState('');
   const [name, setName] = useState('');
   const [category, setCategory] = useState('Stationery');
@@ -43,27 +63,83 @@ export function InventoryManager({ products, onInventoryUpdated }: InventoryMana
   const [lowStockThreshold, setLowStockThreshold] = useState('5');
   const [variantsStr, setVariantsStr] = useState('');
 
-  const [loading, setLoading] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
-    null
-  );
-
   const categories = ['All', 'Apparel', 'Stationery', 'Office'];
 
-  // Filtering
-  const filtered = products.filter((p) => {
-    if (categoryFilter !== 'All' && p.category.toLowerCase() !== categoryFilter.toLowerCase())
-      return false;
-    if (lowStockOnly && p.stock_quantity > p.low_stock_threshold) return false;
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      p.name.toLowerCase().includes(q) ||
-      p.sku.toLowerCase().includes(q) ||
-      p.category.toLowerCase().includes(q)
-    );
-  });
+  // Filter & Sort
+  const filteredProducts = useMemo(() => {
+    return products
+      .filter((p) => {
+        if (categoryFilter !== 'All' && p.category.toLowerCase() !== categoryFilter.toLowerCase())
+          return false;
 
+        const isOutOfStock = p.stock_quantity === 0;
+        const isLowStock = p.stock_quantity > 0 && p.stock_quantity <= p.low_stock_threshold;
+        const isInStock = p.stock_quantity > p.low_stock_threshold;
+
+        if (statusFilter === 'out_of_stock' && !isOutOfStock) return false;
+        if (statusFilter === 'low_stock' && !isLowStock) return false;
+        if (statusFilter === 'in_stock' && !isInStock) return false;
+
+        if (!search) return true;
+        const q = search.toLowerCase();
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.sku.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => {
+        if (sortBy === 'stock_asc') return a.stock_quantity - b.stock_quantity;
+        if (sortBy === 'stock_desc') return b.stock_quantity - a.stock_quantity;
+        if (sortBy === 'name_asc') return a.name.localeCompare(b.name);
+        if (sortBy === 'price_desc') return b.price - a.price;
+        return 0;
+      });
+  }, [products, categoryFilter, statusFilter, search, sortBy]);
+
+  // Handle Manual Stock Adjustment
+  const handleConfirmStockAdjustment = async () => {
+    if (!adjustingProduct) return;
+    setActionLoading(true);
+
+    const delta = adjustType === 'increase' ? adjustQuantity : -adjustQuantity;
+    const newStock = Math.max(0, adjustingProduct.stock_quantity + delta);
+
+    try {
+      const resp = await fetch(`/api/inventory/${adjustingProduct.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stock_quantity: newStock,
+          reason: adjustReason,
+        }),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to adjust stock');
+
+      if (onShowToast) {
+        onShowToast(
+          'success',
+          'Stock Adjusted',
+          `${adjustingProduct.name}: ${adjustingProduct.stock_quantity} → ${newStock} units (${adjustType === 'increase' ? '+' : '-'}${adjustQuantity}).`
+        );
+      }
+
+      setAdjustingProduct(null);
+      if (selectedProduct?.id === adjustingProduct.id) {
+        setSelectedProduct(data.product);
+      }
+      onInventoryUpdated();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error adjusting stock';
+      if (onShowToast) onShowToast('error', 'Adjustment Failed', msg);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Add / Edit Product
   const openAddModal = () => {
     setEditingProduct(null);
     setSku(`SKU-${Math.random().toString(36).substring(2, 7).toUpperCase()}`);
@@ -74,7 +150,6 @@ export function InventoryManager({ products, onInventoryUpdated }: InventoryMana
     setStockQuantity('15');
     setLowStockThreshold('5');
     setVariantsStr('');
-    setFeedback(null);
     setIsAddModalOpen(true);
   };
 
@@ -88,40 +163,28 @@ export function InventoryManager({ products, onInventoryUpdated }: InventoryMana
     setStockQuantity(String(p.stock_quantity));
     setLowStockThreshold(String(p.low_stock_threshold));
     setVariantsStr(p.variants.join(', '));
-    setFeedback(null);
     setIsAddModalOpen(true);
   };
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
-    setFeedback(null);
+    setActionLoading(true);
 
     const priceNum = parseFloat(price);
     const stockNum = parseInt(stockQuantity, 10);
-    const thresholdNum = parseInt(lowStockThreshold, 10);
-
-    if (isNaN(priceNum) || priceNum < 0) {
-      setFeedback({ type: 'error', message: 'Price must be a valid non-negative number.' });
-      setLoading(false);
-      return;
-    }
-
-    if (isNaN(stockNum) || stockNum < 0) {
-      setFeedback({ type: 'error', message: 'Stock quantity cannot be negative.' });
-      setLoading(false);
-      return;
-    }
+    const lowNum = parseInt(lowStockThreshold, 10);
 
     const payload = {
-      sku,
-      name,
-      category,
-      description,
-      price: priceNum,
-      stock_quantity: stockNum,
-      low_stock_threshold: isNaN(thresholdNum) ? 5 : thresholdNum,
-      variants: variantsStr.split(',').map((v) => v.trim()).filter(Boolean),
+      sku: sku.trim(),
+      name: name.trim(),
+      category: category.trim(),
+      description: description.trim(),
+      price: isNaN(priceNum) ? 0 : priceNum,
+      stock_quantity: isNaN(stockNum) ? 0 : stockNum,
+      low_stock_threshold: isNaN(lowNum) ? 5 : lowNum,
+      variants: variantsStr
+        ? variantsStr.split(',').map((v) => v.trim()).filter(Boolean)
+        : [],
     };
 
     try {
@@ -137,182 +200,75 @@ export function InventoryManager({ products, onInventoryUpdated }: InventoryMana
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save product');
 
-      setFeedback({
-        type: 'success',
-        message: editingProduct ? `Product "${name}" updated!` : `Product "${name}" added to inventory!`,
-      });
       setIsAddModalOpen(false);
+      if (onShowToast) {
+        onShowToast(
+          'success',
+          editingProduct ? 'Product Updated' : 'Product Added',
+          `${payload.name} saved successfully.`
+        );
+      }
       onInventoryUpdated();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error saving product';
-      setFeedback({ type: 'error', message: msg });
+      if (onShowToast) onShowToast('error', 'Save Failed', msg);
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleAdjustStock = async (p: Product, delta: number) => {
-    const nextStock = p.stock_quantity + delta;
-    if (nextStock < 0) {
-      setFeedback({ type: 'error', message: `Cannot reduce stock below 0 for ${p.name}.` });
-      return;
-    }
-
-    try {
-      const resp = await fetch(`/api/inventory/${p.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stock_quantity: nextStock }),
-      });
-      if (!resp.ok) {
-        const d = await resp.json();
-        throw new Error(d.error || 'Failed to adjust stock');
-      }
-      onInventoryUpdated();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Stock adjustment failed';
-      setFeedback({ type: 'error', message: msg });
-    }
-  };
-
-  const handleDeleteProduct = async (p: Product) => {
-    if (!confirm(`Are you sure you want to delete "${p.name}"?`)) return;
-    try {
-      const resp = await fetch(`/api/inventory/${p.id}`, { method: 'DELETE' });
-      if (!resp.ok) {
-        const d = await resp.json();
-        throw new Error(d.error || 'Failed to delete');
-      }
-      onInventoryUpdated();
-      setFeedback({ type: 'success', message: `Product "${p.name}" deleted.` });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Delete failed';
-      setFeedback({ type: 'error', message: msg });
-    }
-  };
-
-  const handleExportCSV = () => {
-    const headers = ['ID', 'SKU', 'Name', 'Category', 'Price', 'Stock', 'LowStockThreshold', 'Variants'];
-    const rows = filtered.map((p) => [
-      `"${p.id}"`,
-      `"${p.sku}"`,
-      `"${p.name.replace(/"/g, '""')}"`,
-      `"${p.category}"`,
-      p.price.toFixed(2),
-      p.stock_quantity,
-      p.low_stock_threshold,
-      `"${p.variants.join('; ')}"`,
-    ]);
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `orderpilot-inventory-${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleResetSampleInventory = async () => {
-    if (!confirm('Reset inventory and orders to pristine sample state?')) return;
-    try {
-      const resp = await fetch('/api/demo/reset', { method: 'POST' });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error);
-      onInventoryUpdated();
-      setFeedback({ type: 'success', message: 'Sample inventory restored cleanly!' });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Reset failed';
-      setFeedback({ type: 'error', message: msg });
+      setActionLoading(false);
     }
   };
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200/80 shadow-sm">
+      {/* Top Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/90 p-6 rounded-2xl border border-slate-800 shadow-sm">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
-              Real Inventory Registry
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2.5">
+              <Package className="w-6 h-6 text-blue-400" />
+              Inventory &amp; Stock Operations
             </h1>
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700">
-              {products.length} Stored Products
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              {products.length} Products Tracked
             </span>
           </div>
-          <p className="text-sm text-slate-500 mt-1">
-            Ground-truth catalog consulted by the AI agent during message parsing and re-verified atomically at approval time.
+          <p className="text-sm text-slate-400 mt-1">
+            Real-time stock catalog inspected by the AI agent before drafting customer orders.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={openAddModal}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-all"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Add Product</span>
-          </button>
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export CSV</span>
-          </button>
-          <button
-            onClick={handleResetSampleInventory}
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors"
-            title="Reset to default hackathon sample catalog"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset Demo Catalog</span>
-          </button>
-        </div>
+        <button
+          onClick={openAddModal}
+          className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-semibold shadow-md shadow-blue-600/20 transition-all self-start md:self-auto"
+        >
+          <Plus className="w-4 h-4" />
+          <span>Add New Product</span>
+        </button>
       </div>
 
-      {feedback && (
-        <div
-          className={`p-3.5 rounded-xl text-xs flex items-start gap-2.5 ${
-            feedback.type === 'success'
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
-              : 'bg-rose-50 border border-rose-200 text-rose-800'
-          }`}
-        >
-          {feedback.type === 'success' ? (
-            <CheckCircle className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
-          ) : (
-            <AlertCircle className="w-4 h-4 text-rose-600 mt-0.5 shrink-0" />
-          )}
-          <span>{feedback.message}</span>
-        </div>
-      )}
-
-      {/* Toolbar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm text-xs">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+      {/* Search, Filter & Sort Controls Strip */}
+      <div className="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+        {/* Search */}
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search products by SKU, name, or category..."
-            className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100"
+            placeholder="Search by product name, SKU, category..."
+            className="w-full pl-10 pr-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Filter Pills */}
+        <div className="flex items-center gap-2 flex-wrap text-xs">
           {/* Category Filter */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
             {categories.map((cat) => (
               <button
                 key={cat}
                 onClick={() => setCategoryFilter(cat)}
-                className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all ${
-                  categoryFilter === cat
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-800'
+                className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                  categoryFilter === cat ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 {cat}
@@ -320,263 +276,483 @@ export function InventoryManager({ products, onInventoryUpdated }: InventoryMana
             ))}
           </div>
 
-          {/* Low Stock Toggle */}
-          <button
-            onClick={() => setLowStockOnly(!lowStockOnly)}
-            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-              lowStockOnly
-                ? 'bg-rose-50 border-rose-300 text-rose-700'
-                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-            }`}
-          >
-            <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
-            <span>Low Stock Alerts</span>
-          </button>
+          {/* Status Filter */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+            {(
+              [
+                { id: 'All', label: 'All Status' },
+                { id: 'in_stock', label: 'In Stock' },
+                { id: 'low_stock', label: 'Low Stock' },
+                { id: 'out_of_stock', label: 'Out of Stock' },
+              ] as const
+            ).map((s) => (
+              <button
+                key={s.id}
+                onClick={() => setStatusFilter(s.id)}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                  statusFilter === s.id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Sort Dropdown */}
+          <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-xl border border-slate-800 text-slate-400">
+            <ArrowUpDown className="w-3.5 h-3.5 text-slate-500" />
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+              className="bg-transparent text-xs text-slate-300 focus:outline-none"
+            >
+              <option value="stock_asc" className="bg-slate-900">Stock (Lowest First)</option>
+              <option value="stock_desc" className="bg-slate-900">Stock (Highest First)</option>
+              <option value="name_asc" className="bg-slate-900">Name (A-Z)</option>
+              <option value="price_desc" className="bg-slate-900">Price (Highest First)</option>
+            </select>
+          </div>
         </div>
       </div>
 
       {/* Inventory Table */}
-      <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider">
+            <thead className="bg-slate-950/80 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800">
               <tr>
-                <th className="p-3.5">SKU &amp; Name</th>
-                <th className="p-3.5">Category</th>
-                <th className="p-3.5 text-right">Price</th>
-                <th className="p-3.5">Stock Level</th>
-                <th className="p-3.5">Variants</th>
-                <th className="p-3.5 text-center">Quick Adjust</th>
-                <th className="p-3.5 text-center">Actions</th>
+                <th className="py-3 px-4">Product Details</th>
+                <th className="py-3 px-3">SKU</th>
+                <th className="py-3 px-3">Category</th>
+                <th className="py-3 px-3 text-right">Price</th>
+                <th className="py-3 px-3 text-center">Current Stock</th>
+                <th className="py-3 px-3 text-center">Reorder Level</th>
+                <th className="py-3 px-3 text-center">Stock Status</th>
+                <th className="py-3 px-4 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="text-center py-12 text-slate-400">
-                    No products found.
-                  </td>
-                </tr>
-              ) : (
-                filtered.map((prod) => {
-                  const isLow = prod.stock_quantity <= prod.low_stock_threshold;
-                  const isOut = prod.stock_quantity === 0;
+            <tbody className="divide-y divide-slate-800/60">
+              {filteredProducts.map((p) => {
+                const isOutOfStock = p.stock_quantity === 0;
+                const isLowStock = p.stock_quantity > 0 && p.stock_quantity <= p.low_stock_threshold;
+                const statusBadge = isOutOfStock
+                  ? { label: 'OUT OF STOCK', color: 'bg-rose-500/10 text-rose-400 border-rose-500/20' }
+                  : isLowStock
+                  ? { label: 'LOW STOCK', color: 'bg-amber-500/10 text-amber-400 border-amber-500/20' }
+                  : { label: 'IN STOCK', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' };
 
-                  return (
-                    <tr key={prod.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="p-3.5">
-                        <div className="font-bold text-slate-900">{prod.name}</div>
-                        <div className="text-[11px] font-mono text-slate-400">{prod.sku}</div>
-                      </td>
-                      <td className="p-3.5">
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-700">
-                          {prod.category}
-                        </span>
-                      </td>
-                      <td className="p-3.5 text-right font-bold text-slate-900">
-                        ${prod.price.toFixed(2)}
-                      </td>
-                      <td className="p-3.5">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`font-bold ${
-                              isOut ? 'text-rose-600' : isLow ? 'text-amber-600' : 'text-slate-900'
-                            }`}
-                          >
-                            {prod.stock_quantity} units
-                          </span>
-                          {isOut ? (
-                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-rose-100 text-rose-800 uppercase">
-                              Out of Stock
-                            </span>
-                          ) : isLow ? (
-                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 uppercase">
-                              Low Stock (&le;{prod.low_stock_threshold})
-                            </span>
-                          ) : (
-                            <span className="text-[9px] font-semibold text-emerald-700">OK</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-3.5 text-slate-500 max-w-[180px] truncate">
-                        {prod.variants.length > 0 ? prod.variants.join(', ') : 'None'}
-                      </td>
-                      <td className="p-3.5 text-center">
-                        <div className="inline-flex items-center gap-1.5">
-                          <button
-                            onClick={() => handleAdjustStock(prod, -1)}
-                            disabled={prod.stock_quantity <= 0}
-                            className="p-1 hover:bg-slate-100 text-slate-600 rounded disabled:opacity-40"
-                            title="Decrease stock by 1"
-                          >
-                            <MinusCircle className="w-4 h-4" />
-                          </button>
-                          <span className="font-mono text-xs w-6 text-center">
-                            {prod.stock_quantity}
-                          </span>
-                          <button
-                            onClick={() => handleAdjustStock(prod, 1)}
-                            className="p-1 hover:bg-slate-100 text-slate-600 rounded"
-                            title="Increase stock by 1"
-                          >
-                            <PlusCircle className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                      <td className="p-3.5 text-center">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            onClick={() => openEditModal(prod)}
-                            className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-blue-600"
-                            title="Edit Product"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteProduct(prod)}
-                            className="p-1.5 hover:bg-rose-50 rounded-lg text-slate-400 hover:text-rose-600"
-                            title="Delete Product"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
+                return (
+                  <tr key={p.id} className="hover:bg-slate-800/40 transition-colors">
+                    <td className="py-3 px-4">
+                      <div className="font-semibold text-slate-100">{p.name}</div>
+                      <div className="text-[11px] text-slate-500 line-clamp-1 max-w-sm">{p.description}</div>
+                    </td>
+
+                    <td className="py-3 px-3 font-mono text-blue-400">{p.sku}</td>
+
+                    <td className="py-3 px-3">
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-medium text-[10px]">
+                        {p.category}
+                      </span>
+                    </td>
+
+                    <td className="py-3 px-3 text-right font-mono text-slate-200 font-semibold">
+                      ${p.price.toFixed(2)}
+                    </td>
+
+                    <td className="py-3 px-3 text-center font-mono font-bold text-sm">
+                      <span className={isOutOfStock ? 'text-rose-400' : isLowStock ? 'text-amber-400' : 'text-emerald-400'}>
+                        {p.stock_quantity}
+                      </span>
+                    </td>
+
+                    <td className="py-3 px-3 text-center font-mono text-slate-400">
+                      {p.low_stock_threshold}
+                    </td>
+
+                    <td className="py-3 px-3 text-center">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider border ${statusBadge.color}`}>
+                        {statusBadge.label}
+                      </span>
+                    </td>
+
+                    <td className="py-3 px-4 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => setAdjustingProduct(p)}
+                          className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition-colors text-[11px] font-medium"
+                          title="Quick Stock Adjustment"
+                        >
+                          +/- Stock
+                        </button>
+                        <button
+                          onClick={() => setSelectedProduct(p)}
+                          className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                          title="View Product Detail Drawer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => openEditModal(p)}
+                          className="p-1.5 text-slate-400 hover:text-blue-400 rounded-lg hover:bg-slate-800 transition-colors"
+                          title="Edit Product"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+
+        <div className="p-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-500">
+          <span>Showing {filteredProducts.length} of {products.length} products</span>
+          <span>Automatic safety guardrails enabled</span>
+        </div>
       </div>
 
-      {/* Add / Edit Product Modal */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-base font-bold text-slate-900">
-                {editingProduct ? 'Edit Product' : 'Add New Product'}
-              </h3>
+      {/* =========================================
+          PRODUCT DETAIL DRAWER
+          ========================================= */}
+      {selectedProduct && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div
+            className="w-full max-w-md bg-slate-900 border-l border-slate-800 h-full overflow-y-auto p-6 flex flex-col shadow-2xl animate-in slide-in-from-right duration-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between pb-4 border-b border-slate-800">
+              <div>
+                <span className="font-mono text-xs text-blue-400">{selectedProduct.sku}</span>
+                <h3 className="text-lg font-bold text-white mt-0.5">{selectedProduct.name}</h3>
+                <p className="text-xs text-slate-400">{selectedProduct.category}</p>
+              </div>
               <button
-                onClick={() => setIsAddModalOpen(false)}
-                className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-700"
+                onClick={() => setSelectedProduct(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveProduct} className="space-y-3 text-xs">
+            <div className="py-5 space-y-5 text-xs flex-1">
+              <div>
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block mb-1">
+                  Product Description
+                </span>
+                <p className="text-slate-300 leading-relaxed bg-slate-950/50 p-3 rounded-xl border border-slate-800">
+                  {selectedProduct.description || 'No description provided.'}
+                </p>
+              </div>
+
+              {/* Stock Status Cards */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                  <span className="text-[11px] text-slate-400 block">Current Stock</span>
+                  <span className="text-2xl font-bold font-mono text-white mt-1 block">
+                    {selectedProduct.stock_quantity}
+                  </span>
+                </div>
+                <div className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                  <span className="text-[11px] text-slate-400 block">Safety Reorder Level</span>
+                  <span className="text-2xl font-bold font-mono text-amber-400 mt-1 block">
+                    {selectedProduct.low_stock_threshold}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider block mb-2">
+                  Known Variants
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedProduct.variants.map((v, i) => (
+                    <span key={i} className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 text-xs">
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Unit Retail Price:</span>
+                  <span className="font-mono font-bold text-white text-sm">
+                    ${selectedProduct.price.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Created:</span>
+                  <span className="text-slate-300">{new Date(selectedProduct.created_at).toLocaleDateString()}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 flex gap-2">
+              <button
+                onClick={() => {
+                  setAdjustingProduct(selectedProduct);
+                  setSelectedProduct(null);
+                }}
+                className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition-colors"
+              >
+                Adjust Stock Level
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================
+          STOCK ADJUSTMENT MODAL
+          ========================================= */}
+      {adjustingProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div
+            className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 animate-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div>
+                <h3 className="text-base font-bold text-white">Manual Stock Adjustment</h3>
+                <p className="text-xs text-slate-400">{adjustingProduct.name}</p>
+              </div>
+              <button
+                onClick={() => setAdjustingProduct(null)}
+                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Type selector */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setAdjustType('increase')}
+                className={`py-2 px-3 rounded-xl font-bold flex items-center justify-center gap-1.5 border transition-all ${
+                  adjustType === 'increase'
+                    ? 'bg-emerald-600 text-white border-emerald-500 shadow-md shadow-emerald-600/20'
+                    : 'bg-slate-950 text-slate-400 border-slate-800'
+                }`}
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>+ Increase Stock</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdjustType('decrease')}
+                className={`py-2 px-3 rounded-xl font-bold flex items-center justify-center gap-1.5 border transition-all ${
+                  adjustType === 'decrease'
+                    ? 'bg-rose-600 text-white border-rose-500 shadow-md shadow-rose-600/20'
+                    : 'bg-slate-950 text-slate-400 border-slate-800'
+                }`}
+              >
+                <MinusCircle className="w-4 h-4" />
+                <span>- Decrease Stock</span>
+              </button>
+            </div>
+
+            {/* Quantity */}
+            <div className="space-y-1.5 text-xs">
+              <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                Quantity to {adjustType}
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={adjustQuantity}
+                onChange={(e) => setAdjustQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Reason */}
+            <div className="space-y-1.5 text-xs">
+              <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                Reason for Adjustment (Required for Audit Trail)
+              </label>
+              <input
+                type="text"
+                value={adjustReason}
+                onChange={(e) => setAdjustReason(e.target.value)}
+                placeholder="e.g. Shipment received, Inventory count audit, Damaged write-off"
+                className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Preview */}
+            <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl text-xs space-y-1">
+              <div className="flex justify-between text-slate-400">
+                <span>Current Stock:</span>
+                <span className="font-mono text-white font-bold">{adjustingProduct.stock_quantity}</span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>Adjustment:</span>
+                <span className={`font-mono font-bold ${adjustType === 'increase' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {adjustType === 'increase' ? '+' : '-'}{adjustQuantity}
+                </span>
+              </div>
+              <div className="pt-2 border-t border-slate-800 flex justify-between font-bold text-white">
+                <span>New Stock Level:</span>
+                <span className="font-mono text-emerald-400">
+                  {Math.max(
+                    0,
+                    adjustingProduct.stock_quantity + (adjustType === 'increase' ? adjustQuantity : -adjustQuantity)
+                  )}
+                </span>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setAdjustingProduct(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 rounded-xl"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmStockAdjustment}
+                disabled={actionLoading}
+                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-md shadow-blue-600/20"
+              >
+                {actionLoading ? 'Saving...' : 'Confirm & Log Audit'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================
+          ADD / EDIT PRODUCT MODAL
+          ========================================= */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div
+            className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 space-y-4 animate-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white">
+                {editingProduct ? 'Edit Catalog Product' : 'Add New Catalog Product'}
+              </h3>
+              <button
+                onClick={() => setIsAddModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveProduct} className="space-y-4 text-xs">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">SKU</label>
+                  <label className="text-slate-400 block mb-1">SKU</label>
                   <input
                     type="text"
                     required
                     value={sku}
                     onChange={(e) => setSku(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-lg font-mono outline-none focus:border-blue-500"
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Category</label>
+                  <label className="text-slate-400 block mb-1">Category</label>
                   <input
                     type="text"
                     required
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
-                    placeholder="e.g. Apparel, Stationery"
-                    className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Product Name</label>
+                <label className="text-slate-400 block mb-1">Product Name</label>
                 <input
                   type="text"
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Blue cotton shirt, medium"
-                  className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white"
                 />
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Description</label>
+                <label className="text-slate-400 block mb-1">Description</label>
                 <textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={2}
-                  className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white"
                 />
               </div>
 
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Price ($)</label>
+                  <label className="text-slate-400 block mb-1">Price ($)</label>
                   <input
                     type="number"
                     step="0.01"
-                    min="0"
                     required
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Stock Quantity</label>
+                  <label className="text-slate-400 block mb-1">Stock Qty</label>
                   <input
                     type="number"
-                    min="0"
                     required
                     value={stockQuantity}
                     onChange={(e) => setStockQuantity(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Low-Stock Alert</label>
+                  <label className="text-slate-400 block mb-1">Reorder Level</label>
                   <input
                     type="number"
-                    min="1"
                     required
                     value={lowStockThreshold}
                     onChange={(e) => setLowStockThreshold(e.target.value)}
-                    className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                    className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">
-                  Variants (comma-separated)
-                </label>
+                <label className="text-slate-400 block mb-1">Variants (comma separated)</label>
                 <input
                   type="text"
                   value={variantsStr}
                   onChange={(e) => setVariantsStr(e.target.value)}
-                  placeholder="e.g. Medium, Blue, 160 Pages"
-                  className="w-full p-2.5 border border-slate-200 rounded-lg outline-none focus:border-blue-500"
+                  placeholder="e.g. Small, Medium, Large"
+                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white"
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
                   onClick={() => setIsAddModalOpen(false)}
-                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-semibold"
+                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 rounded-xl"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={loading}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shadow-sm"
+                  disabled={actionLoading}
+                  className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-xl shadow-md shadow-blue-600/20"
                 >
-                  {loading ? 'Saving...' : 'Save Product'}
+                  {actionLoading ? 'Saving...' : 'Save Product'}
                 </button>
               </div>
             </form>
